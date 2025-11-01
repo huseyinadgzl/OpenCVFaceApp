@@ -1,15 +1,16 @@
-﻿using System;
+﻿using OpenCvSharp;
+using OpenCvSharp.Extensions;
+using OpenCvSharp.Face;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using OpenCvSharp;
-using OpenCvSharp.Extensions;
-using System.IO;
 
 namespace OpenCVFaceApp
 {
@@ -19,12 +20,80 @@ namespace OpenCVFaceApp
         private Mat _frame;
         private Timer _timer;
         private CascadeClassifier _faceCascade;
-
+        private LBPHFaceRecognizer _recognizer; 
+        private List<int> _labels = new List<int>(); 
+        private int _nextLabel = 0; 
         public Form1()
         {
             InitializeComponent();
         }
+        private void TrainRecognizer()
+        {
+            List<Mat> imagesToTrain = new List<Mat>();
+            List<int> labelsToTrain = new List<int>();
+            _nextLabel = 0; 
 
+            string facesDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Faces");
+            if (!Directory.Exists(facesDir))
+            {
+                lblProcess.Text = "Eğitim için 'Faces' klasöründe veri bulunamadı.";
+                return;
+            }
+
+           
+            _recognizer = LBPHFaceRecognizer.Create();
+
+            var subDirs = Directory.GetDirectories(facesDir);
+
+            foreach (var dir in subDirs)
+            {
+                string personName = new DirectoryInfo(dir).Name;
+
+                
+                int label = _nextLabel++;
+
+                string[] images = Directory.GetFiles(dir, "*.jpg");
+
+                foreach (string imagePath in images)
+                {
+                    using (Mat img = Cv2.ImRead(imagePath, ImreadModes.Grayscale))
+                    {
+                        if (img.Empty()) continue;
+
+                       
+                        Rect[] faces = _faceCascade.DetectMultiScale(img, 1.1, 4, 0, new OpenCvSharp.Size(30, 30));
+
+                        if (faces.Length > 0)
+                        {
+                            
+                            using (Mat faceROI = new Mat(img, faces[0]))
+                            {
+                                
+                                Mat clonedFace = faceROI.Clone();
+
+                                imagesToTrain.Add(clonedFace); 
+                                labelsToTrain.Add(label);
+
+                               
+                            }
+                        }
+                    }
+                }
+                lblProcess.Text = $"{personName} etiketi ({label}) için yüzler yüklendi.";
+            }
+
+            if (imagesToTrain.Count > 0)
+            {
+              
+                _recognizer.Train(imagesToTrain.ToArray(), labelsToTrain.ToArray());
+
+                lblProcess.Text = $"EĞİTİM BAŞARILI! Toplam {imagesToTrain.Count} yüz örneği ile eğitildi.";
+            }
+            else
+            {
+                lblProcess.Text = "HATA: Hiçbir eğitilebilir yüz örneği bulunamadı.";
+            }
+        }
         private void Form1_Load(object sender, EventArgs e)
         {
             string cascadePath = "haarcascade_frontalface_default.xml";
@@ -32,8 +101,7 @@ namespace OpenCVFaceApp
 
             if (_faceCascade.Empty())
             {
-               // lblProcess.Text = $"HATA: Yüz tanıma dosyası ({cascadePath}) bulunamadı! Lütfen XML dosyasını 'bin\Debug' klasörüne kopyalayın.";
-                // Dosya yoksa kamerayı başlatmaya gerek yok.
+              
                 return;
             }
             else
@@ -42,7 +110,7 @@ namespace OpenCVFaceApp
             }
 
 
-            // 2. KAMERAYI BAŞLAT
+           
             _capture = new VideoCapture(0);
 
             if (!_capture.IsOpened())
@@ -51,11 +119,15 @@ namespace OpenCVFaceApp
                 return;
             }
 
-            // 3. Görüntüleme için Timer'ı ayarla
+          
             _timer = new Timer();
-            _timer.Interval = 30; // Yaklaşık 33 FPS
+            _timer.Interval = 30; 
             _timer.Tick += Timer_Tick;
             _timer.Start();
+            if (_faceCascade != null && !_faceCascade.Empty())
+            {
+                TrainRecognizer();
+            }
         }
         private void Timer_Tick(object sender, EventArgs e)
         {
@@ -63,42 +135,73 @@ namespace OpenCVFaceApp
 
             if (_frame != null)
             {
-                _frame.Dispose(); // Önceki Mat nesnesini temizle
+                _frame.Dispose();
             }
 
             _frame = new Mat();
             if (_capture.Read(_frame))
             {
-                // 1. Önceki resmi temizle (Bellek sızıntısını önlemek için)
+               
                 if (pictureBoxCamera.Image != null)
                 {
                     pictureBoxCamera.Image.Dispose();
                     pictureBoxCamera.Image = null;
                 }
 
-                // 2. Görüntüyü gri tonlamaya çevir (Yüz algılama için)
+              
                 using (Mat grayFrame = new Mat())
                 {
                     Cv2.CvtColor(_frame, grayFrame, ColorConversionCodes.BGR2GRAY);
 
-                    // 3. Kontrastı ayarla
                     Cv2.EqualizeHist(grayFrame, grayFrame);
 
-                    // 4. Yüzleri Algıla (CS0104 hatasını düzelttik!)
                     Rect[] faces = _faceCascade.DetectMultiScale(
-                        grayFrame,
-                        1.1,
-                        4,
-                        0,
-                        new OpenCvSharp.Size(30, 30)); // <-- OpenCvSharp.Size kullandık!
+    grayFrame,
+    1.1,
+    4,
+    0,
+    new OpenCvSharp.Size(30, 30));
 
-                    // 5. Tespit edilen yüzlerin etrafına Kırmızı dikdörtgen çiz
-                    foreach (var face in faces)
+                    
+                    foreach (var face in faces) 
                     {
-                        Cv2.Rectangle(_frame, face, new Scalar(0, 0, 255), 2);
+                        
+                        string personName = "Bilinmiyor";
+                        double confidence = 100.0; 
+                        int predictedLabel = -1;
+
+                       
+                        if (_recognizer != null && !_recognizer.Empty)
+                        {
+                            
+                            using (Mat faceROI = new Mat(grayFrame, face))
+                            {
+                                
+                                _recognizer.Predict(faceROI, out predictedLabel, out confidence);
+
+                                double threshold = 80.0; 
+
+                                if (confidence < threshold)
+                                {
+                                   
+                                    if (predictedLabel == 0) personName = "Huseyin (ID:0)";
+                                    else if (predictedLabel == 1) personName = "unknown (ID:1)";
+                                    
+                                }
+                            } 
+                        }
+
+                        
+                        Cv2.PutText(_frame, $"{personName} ({confidence:0.0})",
+                                    new OpenCvSharp.Point(face.X, face.Y - 10), 
+                                    HersheyFonts.HersheySimplex, 0.7, new Scalar(0, 255, 0), 2);
+
+                        
+                        Scalar color = (confidence < 80.0) ? new Scalar(0, 255, 0) : new Scalar(0, 0, 255);
+                        Cv2.Rectangle(_frame, face, color, 2);
                     }
 
-                    // 6. Sonucu PictureBox'a Göster (Güvenli Yöntem: Klonlama)
+                   
                     using (Bitmap tempBmp = _frame.ToBitmap())
                     {
                         Bitmap finalBmp = (Bitmap)tempBmp.Clone();
@@ -106,13 +209,13 @@ namespace OpenCVFaceApp
                     }
                 }
 
-                // 7. Okunan Mat nesnesini serbest bırak
+                
                 _frame.Dispose();
             }
         }
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            // Kaynakları temizle
+           
             if (_timer != null)
             {
                 _timer.Stop();
@@ -139,21 +242,21 @@ namespace OpenCVFaceApp
         return;
     }
 
-    // 2. Yüz algılamanın çalıştığını kontrol et
+    
     if (_faceCascade == null || _faceCascade.Empty())
     {
         lblProcess.Text = "HATA: Yüz tanıma modeli yüklenmemiş.";
         return;
     }
 
-    // 3. Kameradan son kareyi yakala (Tanıtım için sadece tek bir kare yeterli)
+    
     if (_capture == null || !_capture.IsOpened())
     {
         lblProcess.Text = "HATA: Kamera açık değil.";
         return;
     }
 
-    // Kameradan mevcut kareyi yakala
+    
     using (Mat frameToSave = new Mat())
     {
                 if (!_capture.Read(frameToSave))
@@ -162,7 +265,7 @@ namespace OpenCVFaceApp
             return;
         }
 
-        // 4. Yüz Tespiti (Kaydedeceğimiz yüzü bulmak için)
+       
         using (Mat grayFrame = new Mat())
         {
             Cv2.CvtColor(frameToSave, grayFrame, ColorConversionCodes.BGR2GRAY);
@@ -178,36 +281,32 @@ namespace OpenCVFaceApp
                 return;
             }
             
-            // Sadece ilk bulunan yüzü kaydedeceğiz (birden fazla yüz varsa)
+            
             Rect faceRect = faces[0]; 
 
-            // 5. Yüz Bölgesini Kes (Region of Interest - ROI)
-            // OpenCV'de Mat kesmek basit bir işlemle yapılır:
+            
+            
             using (Mat faceImg = new Mat(frameToSave, faceRect))
             {
-                // 6. Kayıt Klasörünü Oluştur ve Dosyayı Kaydet
-                
-                // Ana klasör yolu (Projenin çalıştırıldığı yer)
+              
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory; 
                 string personFolder = Path.Combine(baseDir, "Faces", personName);
 
-                // Eğer kişiye ait klasör yoksa oluştur
+                
                 if (!Directory.Exists(personFolder))
                 {
                     Directory.CreateDirectory(personFolder);
                 }
 
-                // Dosya adı oluştur (Örn: John_1.jpg)
                 int count = Directory.GetFiles(personFolder, "*.jpg").Length + 1;
                 string filePath = Path.Combine(personFolder, $"{personName}_{count}.jpg");
 
-                // Resmi kaydet (Ölçeklendirme önerilir, şimdilik orijinal boyutta kaydediyoruz)
                 Cv2.ImWrite(filePath, faceImg); 
 
                 lblProcess.Text = $"{personName} için {count}. yüz kaydedildi!";
             }
-        } // grayFrame Dispose olur
-    } // frameToSave Dispose olur
+        } 
+    } 
         }
     }
 }
